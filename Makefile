@@ -44,7 +44,7 @@ SDL_LIBS   := $(shell sdl2-config --libs 2>/dev/null)
 # ---------------------------------------------------------------------
 
 # Portable core plus the app: no SDL, and the unit tests link against these.
-CORE = mv_geo mv_proto mv_log mv_sim mv_app
+CORE = mv_geo mv_proto mv_log mv_config mv_sim mv_app
 
 ifeq ($(OS),Windows_NT)
     PLAT = plat_win32
@@ -58,7 +58,7 @@ OBJS = $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(CORE) $(PLAT) $(UI)))
 
 TARGET = magview
 
-TESTS = test_proto test_geo test_log
+TESTS = test_proto test_geo test_log test_config
 
 .PHONY: all clean test debug windows run
 
@@ -90,7 +90,7 @@ endif
 
 # The core the tests exercise, plus the POSIX platform for mv_log's file I/O.
 TEST_SRCS = $(SRC_DIR)/mv_geo.c $(SRC_DIR)/mv_proto.c $(SRC_DIR)/mv_log.c \
-            $(SRC_DIR)/plat_posix.c
+            $(SRC_DIR)/mv_config.c $(SRC_DIR)/plat_posix.c
 
 test:
 	@mkdir -p $(OBJ_DIR)
@@ -113,7 +113,7 @@ run: $(TARGET)
 windows:
 	$(MAKE) CC=x86_64-w64-mingw32-gcc OS=Windows_NT \
 	        SDL_CFLAGS="$$(x86_64-w64-mingw32-pkg-config --cflags sdl2)" \
-	        SDL_LIBS="$$(x86_64-w64-mingw32-pkg-config --libs sdl2)" \
+	        SDL_LIBS="$$(x86_64-w64-mingw32-pkg-config --libs sdl2) -lws2_32 -lshell32" \
 	        TARGET=magview.exe
 
 clean:

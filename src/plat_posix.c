@@ -31,6 +31,9 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <time.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* ---- time ---------------------------------------------------------- */
 
@@ -217,6 +220,60 @@ int plat_serial_write(PlatSerial *s, const void *buf, size_t len)
         return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                ? 0 : -1;
     return (int)w;
+}
+
+/* ---- UDP ----------------------------------------------------------- */
+
+struct PlatUdp { int fd; };
+
+PlatUdp *plat_udp_listen(int port)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return NULL;
+
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+#ifdef SO_REUSEPORT
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof on);
+#endif
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        close(fd);
+        return NULL;
+    }
+
+    PlatUdp *u = calloc(1, sizeof *u);
+    if (!u) {
+        close(fd);
+        return NULL;
+    }
+    u->fd = fd;
+    return u;
+}
+
+void plat_udp_close(PlatUdp *u)
+{
+    if (!u)
+        return;
+    close(u->fd);
+    free(u);
+}
+
+int plat_udp_recv(PlatUdp *u, void *buf, size_t cap)
+{
+    if (!u)
+        return -1;
+    ssize_t r = recvfrom(u->fd, buf, cap, 0, NULL, NULL);
+    if (r < 0)
+        return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    return (int)r;
 }
 
 /* ---- filesystem ---------------------------------------------------- */

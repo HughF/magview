@@ -15,6 +15,7 @@
 #include "mv_log.h"
 #include "mv_sim.h"
 #include "mv_geo.h"
+#include "mv_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,11 @@ struct MvApp {
     /* last GPS fix */
     double      fix_lat, fix_lon;
     bool        have_fix;
+
+    /* dedicated GPS source (when not interleaved on the mag line) */
+    PlatSerial *gps_serial;
+    PlatUdp    *gps_udp;
+    MvLineAsm   gps_asm;
 
     /* rate estimate */
     double      dt_ema;
@@ -96,6 +102,31 @@ static void track_push(MvApp *a, const MvSample *s)
     a->track[a->track_n++] = *s;
 }
 
+/* One place that records a fix, whichever source it came from. */
+static void apply_fix(MvApp *a, double lat, double lon)
+{
+    a->fix_lat = lat;
+    a->fix_lon = lon;
+    a->have_fix = true;
+    a->st.last_fix_ms = plat_now_ms();
+    a->st.status.has_fix = true;
+    a->st.status.lat = lat;
+    a->st.status.lon = lon;
+}
+
+/* Lines from a dedicated GPS source: only fixes are of interest here. */
+static void on_gps_line(void *user, const char *line, size_t len)
+{
+    MvApp *a = user;
+    MvMsg m;
+    if (!mv_parse_line(line, len, &m))
+        return;
+    if (m.kind == MV_MSG_GPS) {
+        apply_fix(a, m.lat, m.lon);
+        a->st.gps_sentences++;
+    }
+}
+
 static void on_line(void *user, const char *line, size_t len)
 {
     MvApp *a = user;
@@ -115,13 +146,9 @@ static void on_line(void *user, const char *line, size_t len)
     uint64_t now = plat_now_ms();
 
     if (m.kind == MV_MSG_GPS) {
-        a->fix_lat = m.lat;
-        a->fix_lon = m.lon;
-        a->have_fix = true;
-        a->st.last_fix_ms = now;
-        a->st.status.has_fix = true;
-        a->st.status.lat = m.lat;
-        a->st.status.lon = m.lon;
+        /* Interleaved GPS on the mag line. Honoured regardless of the
+         * configured source: if a rig sends it here, use it. */
+        apply_fix(a, m.lat, m.lon);
         return;
     }
 
@@ -187,8 +214,15 @@ MvApp *mv_app_create(bool simulate)
 
     a->session_ms = plat_now_ms();
     mv_lineasm_reset(&a->asm_);
+    mv_lineasm_reset(&a->gps_asm);
     a->st.simulate = simulate;
     a->st.baud = 9600;
+
+    /* Restore the persisted GPS source and open it if it is a dedicated one. */
+    MvSettings cfg;
+    mv_settings_load(&cfg);
+    mv_app_set_gps(a, cfg.gps_source, cfg.gps_port, cfg.gps_baud,
+                   cfg.gps_udp_port);
 
     if (simulate) {
         a->sim = mv_sim_create();
@@ -202,9 +236,11 @@ void mv_app_destroy(MvApp *a)
 {
     if (!a)
         return;
-    if (a->log)    mv_log_close(a->log);
-    if (a->serial) plat_serial_close(a->serial);
-    if (a->sim)    mv_sim_destroy(a->sim);
+    if (a->log)        mv_log_close(a->log);
+    if (a->serial)     plat_serial_close(a->serial);
+    if (a->gps_serial) plat_serial_close(a->gps_serial);
+    if (a->gps_udp)    plat_udp_close(a->gps_udp);
+    if (a->sim)        mv_sim_destroy(a->sim);
     free(a);
 }
 
@@ -238,11 +274,31 @@ void mv_app_poll(MvApp *a)
         }
     }
 
-    /* Fix goes stale when the GPS stops refreshing it. */
-    uint64_t now = plat_now_ms();
-    if (a->st.status.has_fix &&
-        now - a->st.last_fix_ms > MV_STALE_MS) {
-        /* keep the position but mark it not-current via the UI's stale check */
+    /* Dedicated GPS source, if one is configured. */
+    if (a->gps_serial) {
+        for (int guard = 0; guard < 16; guard++) {
+            int r = plat_serial_read(a->gps_serial, buf, sizeof buf);
+            if (r < 0) {
+                snprintf(a->st.gps_error, sizeof a->st.gps_error,
+                         "lost the GPS serial port %.120s", a->st.gps_port);
+                plat_serial_close(a->gps_serial);
+                a->gps_serial = NULL;
+                a->st.gps_link_open = false;
+                break;
+            }
+            if (r == 0)
+                break;
+            mv_lineasm_feed(&a->gps_asm, buf, (size_t)r, on_gps_line, a);
+            if ((size_t)r < sizeof buf)
+                break;
+        }
+    } else if (a->gps_udp) {
+        for (int guard = 0; guard < 32; guard++) {
+            int r = plat_udp_recv(a->gps_udp, buf, sizeof buf);
+            if (r <= 0)
+                break;
+            mv_lineasm_feed(&a->gps_asm, buf, (size_t)r, on_gps_line, a);
+        }
     }
 }
 
@@ -342,6 +398,58 @@ void mv_app_log_stop(MvApp *a)
     mv_log_close(a->log);
     a->log = NULL;
     a->st.logging = false;
+}
+
+const char *mv_app_set_gps(MvApp *a, int source, const char *port,
+                           int baud, int udp_port)
+{
+    if (!a)
+        return "no app";
+
+    /* Close whatever was open. */
+    if (a->gps_serial) { plat_serial_close(a->gps_serial); a->gps_serial = NULL; }
+    if (a->gps_udp)    { plat_udp_close(a->gps_udp);       a->gps_udp = NULL; }
+    a->st.gps_link_open = false;
+    a->st.gps_error[0] = '\0';
+    mv_lineasm_reset(&a->gps_asm);
+
+    /* Record and persist the choice regardless of whether opening succeeds —
+     * the rig's wiring is what it is; a transient open failure should not
+     * silently revert it. */
+    a->st.gps_source   = source;
+    a->st.gps_baud     = baud > 0 ? baud : 4800;
+    a->st.gps_udp_port = (udp_port > 0 && udp_port <= 65535) ? udp_port : 10110;
+    snprintf(a->st.gps_port, sizeof a->st.gps_port, "%s", port ? port : "");
+
+    MvSettings cfg;
+    cfg.gps_source   = a->st.gps_source;
+    cfg.gps_baud     = a->st.gps_baud;
+    cfg.gps_udp_port = a->st.gps_udp_port;
+    snprintf(cfg.gps_port, sizeof cfg.gps_port, "%s", a->st.gps_port);
+    mv_settings_save(&cfg);
+
+    const char *err = NULL;
+    if (source == MV_GPS_SERIAL) {
+        if (!a->st.gps_port[0]) {
+            err = "no GPS serial port chosen";
+        } else {
+            a->gps_serial = plat_serial_open(a->st.gps_port, a->st.gps_baud);
+            if (a->gps_serial)
+                a->st.gps_link_open = true;
+            else
+                err = "could not open the GPS serial port";
+        }
+    } else if (source == MV_GPS_UDP) {
+        a->gps_udp = plat_udp_listen(a->st.gps_udp_port);
+        if (a->gps_udp)
+            a->st.gps_link_open = true;
+        else
+            err = "could not bind the GPS UDP port";
+    }
+
+    if (err)
+        snprintf(a->st.gps_error, sizeof a->st.gps_error, "%s", err);
+    return err;
 }
 
 void mv_app_clear(MvApp *a)

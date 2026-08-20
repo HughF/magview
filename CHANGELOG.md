@@ -3,6 +3,16 @@
 All notable changes to magview. Dates are ISO-8601. Versioning is date-based
 (`YYYY.MM.DD`), matching the rest of the toolchain.
 
+## [Unreleased]
+
+### Added
+- **GPS source** dialog (rail → *GPS source…*): the position fix can come from
+  the mag serial line (interleaved, as before), a **separate serial port**, or
+  **UDP** network NMEA (default port 10110). The choice is persisted to
+  `settings.conf` under the per-user config directory and restored on launch.
+- UDP listener back in the platform layer (POSIX + Win32) for the network GPS
+  feed; `mv_config` settings module with a round-trip unit test.
+
 ## [2026.08.20] — first cut
 
 Initial implementation.

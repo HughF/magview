@@ -22,6 +22,11 @@ to use on a boat:
   optional verbatim `.raw` capture of the serial line.
 - **Serial port picker** — enumerates the ports, pick one, choose the baud
   rate, connect. 9600 baud 8N1 is the Explorer's default.
+- **GPS source** (rail → *GPS source…*) — choose where the position fix comes
+  from and it is remembered between sessions:
+  - *Interleaved* on the mag serial line (the Explorer's GPS pass-through),
+  - a *separate serial port* (second GPS device, its own baud), or
+  - *UDP* network NMEA (e.g. a nav PC broadcasting on port 10110).
 - **Console** — every line the instrument sent, for when you need to see the
   wire.
 

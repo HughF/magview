@@ -23,6 +23,7 @@
 #define MV_APP_H
 
 #include "mv_types.h"
+#include "mv_config.h"
 #include "plat.h"
 #include <stddef.h>
 
@@ -55,6 +56,16 @@ typedef struct {
     char        log_path[512];
     long        log_rows;
     long        log_bytes;
+
+    /* GPS input source (mv_config.h). For MV_GPS_INTERLEAVED the fix comes off
+     * the mag line; the other two open a dedicated source. */
+    int         gps_source;
+    char        gps_port[256];
+    int         gps_baud;
+    int         gps_udp_port;
+    bool        gps_link_open;     /* a dedicated source is open           */
+    char        gps_error[160];    /* why a dedicated source failed        */
+    int         gps_sentences;     /* fixes seen from the dedicated source */
 
     bool        simulate;
 } MvState;
@@ -90,6 +101,15 @@ void mv_app_send(MvApp *a, const char *line);
 /* Start/stop logging. start returns NULL or a static failure reason. */
 const char *mv_app_log_start(MvApp *a, const char *dir, bool raw);
 void        mv_app_log_stop(MvApp *a);
+
+/*
+ * Choose where the GPS comes from and persist the choice. `source` is an
+ * MvGpsSource; `port`/`baud` apply to MV_GPS_SERIAL, `udp_port` to
+ * MV_GPS_UDP. Reopens the dedicated source (or closes it for INTERLEAVED).
+ * Returns NULL or a static failure reason.
+ */
+const char *mv_app_set_gps(MvApp *a, int source, const char *port,
+                           int baud, int udp_port);
 
 /* Forget all buffered readings and the track (does not touch the log). */
 void mv_app_clear(MvApp *a);

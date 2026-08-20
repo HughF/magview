@@ -59,6 +59,18 @@ void plat_serial_close(PlatSerial *s);
 int  plat_serial_read(PlatSerial *s, void *buf, size_t cap);
 int  plat_serial_write(PlatSerial *s, const void *buf, size_t len);
 
+/* ---- UDP (listen only, for a network NMEA GPS feed) ---------------- */
+
+typedef struct PlatUdp PlatUdp;
+
+/* Bind a non-blocking UDP socket to `port` on all interfaces (SO_REUSEADDR),
+ * for receiving broadcast or unicast NMEA. NULL on failure. */
+PlatUdp *plat_udp_listen(int port);
+void plat_udp_close(PlatUdp *u);
+
+/* Non-blocking receive. Returns bytes read, 0 if nothing waiting, -1 error. */
+int  plat_udp_recv(PlatUdp *u, void *buf, size_t cap);
+
 /* ---- filesystem ---------------------------------------------------- */
 
 /* Per-user config directory, created if needed. False if it cannot be made. */

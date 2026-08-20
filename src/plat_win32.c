@@ -22,6 +22,8 @@
 
 #include "plat.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -175,6 +177,71 @@ int plat_serial_write(PlatSerial *s, const void *buf, size_t len)
     if (!WriteFile(s->h, buf, (DWORD)len, &put, NULL))
         return -1;
     return (int)put;
+}
+
+/* ---- UDP ----------------------------------------------------------- */
+
+struct PlatUdp { SOCKET s; };
+
+static void wsa_once(void)
+{
+    static bool done = false;
+    if (!done) {
+        WSADATA w;
+        WSAStartup(MAKEWORD(2, 2), &w);
+        done = true;                 /* single-threaded; no lock needed */
+    }
+}
+
+PlatUdp *plat_udp_listen(int port)
+{
+    wsa_once();
+
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == INVALID_SOCKET)
+        return NULL;
+
+    BOOL on = TRUE;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof on);
+
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_port = htons((u_short)port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) {
+        closesocket(s);
+        return NULL;
+    }
+
+    u_long nb = 1;
+    ioctlsocket(s, FIONBIO, &nb);
+
+    PlatUdp *u = calloc(1, sizeof *u);
+    if (!u) {
+        closesocket(s);
+        return NULL;
+    }
+    u->s = s;
+    return u;
+}
+
+void plat_udp_close(PlatUdp *u)
+{
+    if (!u)
+        return;
+    closesocket(u->s);
+    free(u);
+}
+
+int plat_udp_recv(PlatUdp *u, void *buf, size_t cap)
+{
+    if (!u)
+        return -1;
+    int r = recvfrom(u->s, (char *)buf, (int)cap, 0, NULL, NULL);
+    if (r == SOCKET_ERROR)
+        return (WSAGetLastError() == WSAEWOULDBLOCK) ? 0 : -1;
+    return r;
 }
 
 /* ---- filesystem ---------------------------------------------------- */

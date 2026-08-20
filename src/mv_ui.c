@@ -58,7 +58,7 @@ static const char *PAGE_NAME[PAGE_COUNT] = {
     "Field", "Chart", "Log", "Console"
 };
 
-typedef enum { DLG_NONE = 0, DLG_CONNECT, DLG_ABOUT } MvDialog;
+typedef enum { DLG_NONE = 0, DLG_CONNECT, DLG_GPS, DLG_ABOUT } MvDialog;
 typedef enum { DLG_R_NONE, DLG_R_CANCEL, DLG_R_APPLY, DLG_R_OK } DlgResult;
 
 static const int BAUDS[] = { 4800, 9600, 19200, 38400, 57600, 115200 };
@@ -88,6 +88,12 @@ struct MvUi {
     /* connect dialog */
     PlatPortInfo ports[PLAT_MAX_PORTS];
     int      n_ports, sel_port, sel_baud;
+
+    /* gps-source dialog (working copy, committed on OK) */
+    int      gps_source;
+    int      gps_sel_port;
+    int      gps_baud_idx;
+    char     gps_udp_str[16];
 
     /* field page */
     int      win_idx;
@@ -346,6 +352,24 @@ static void draw_rail(MvUi *ui, struct nk_rect r)
                     ui->dialog = DLG_CONNECT;
                 }
             }
+        }
+
+        nk_layout_row_dynamic(c, S(ui, 30), 1);
+        if (nk_button_label(c, "GPS source...")) {
+            ui->dlg_error[0] = ui->dlg_note[0] = '\0';
+            ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
+            ui->gps_source = st->gps_source;
+            ui->gps_sel_port = 0;
+            for (int i = 0; i < ui->n_ports; i++)
+                if (strcmp(ui->ports[i].path, st->gps_port) == 0)
+                    ui->gps_sel_port = i;
+            ui->gps_baud_idx = 0;
+            for (int i = 0; i < N_BAUD; i++)
+                if (BAUDS[i] == st->gps_baud)
+                    ui->gps_baud_idx = i;
+            snprintf(ui->gps_udp_str, sizeof ui->gps_udp_str, "%d",
+                     st->gps_udp_port);
+            ui->dialog = DLG_GPS;
         }
 
         nk_layout_row_dynamic(c, S(ui, 30), 1);
@@ -860,7 +884,7 @@ static void page_console(MvUi *ui, struct nk_rect r)
 /* Dialogs                                                             */
 /* ------------------------------------------------------------------ */
 
-static DlgResult dialog_buttons(MvUi *ui, bool can_apply)
+static DlgResult dialog_buttons(MvUi *ui, bool can_apply, const char *primary)
 {
     struct nk_context *c = ui->ctx;
     DlgResult res = DLG_R_NONE;
@@ -875,7 +899,7 @@ static DlgResult dialog_buttons(MvUi *ui, bool can_apply)
     if (nk_button_label(c, "Cancel"))
         res = DLG_R_CANCEL;
     if (!can_apply) nk_widget_disable_begin(c);
-    if (primary_button(ui, "Connect") && can_apply)
+    if (primary_button(ui, primary) && can_apply)
         res = DLG_R_OK;
     if (!can_apply) nk_widget_disable_end(c);
     return res;
@@ -968,6 +992,141 @@ static void dlg_connect_commit(MvUi *ui, DlgResult r)
     }
 }
 
+/* ---- GPS source ---- */
+
+static void dlg_gps_body(MvUi *ui)
+{
+    struct nk_context *c = ui->ctx;
+    const MvTheme *t = ui->theme;
+    const MvState *st = mv_app_state(ui->app);
+
+    nk_layout_row_dynamic(c, S(ui, 50), 1);
+    nk_label_colored_wrap(c,
+        "Every reading is tagged with the latest fix. Choose where that fix "
+        "comes from — the mag's own output, a second serial port, or an NMEA "
+        "feed over the network. The choice is remembered.", t->text_dim);
+
+    gap(ui, 4);
+    section(ui, "Source");
+
+    nk_layout_row_dynamic(c, S(ui, 24), 1);
+    if (nk_option_label(c, "Interleaved on the mag serial line",
+                        ui->gps_source == MV_GPS_INTERLEAVED))
+        ui->gps_source = MV_GPS_INTERLEAVED;
+    nk_layout_row_dynamic(c, S(ui, 24), 1);
+    if (nk_option_label(c, "A separate serial port",
+                        ui->gps_source == MV_GPS_SERIAL))
+        ui->gps_source = MV_GPS_SERIAL;
+    nk_layout_row_dynamic(c, S(ui, 24), 1);
+    if (nk_option_label(c, "UDP network (NMEA over IP)",
+                        ui->gps_source == MV_GPS_UDP))
+        ui->gps_source = MV_GPS_UDP;
+
+    if (ui->gps_source == MV_GPS_SERIAL) {
+        gap(ui, 4);
+        section(ui, "GPS serial port");
+        nk_layout_row_dynamic(c,
+            list_height(ui, ui->n_ports, 26.0f, 0.0f, 60.0f, 200.0f), 1);
+        if (nk_group_begin(c, "gpsports", NK_WINDOW_BORDER)) {
+            for (int i = 0; i < ui->n_ports; i++) {
+                nk_layout_row_dynamic(c, S(ui, 26), 1);
+                nk_bool on = (i == ui->gps_sel_port);
+                char lab[300];
+                snprintf(lab, sizeof lab, "%s   \xe2\x80\x94   %s",
+                         ui->ports[i].path, ui->ports[i].label);
+                if (nk_selectable_label(c, lab, NK_TEXT_LEFT, &on) && on)
+                    ui->gps_sel_port = i;
+            }
+            if (ui->n_ports == 0) {
+                nk_layout_row_dynamic(c, S(ui, 34), 1);
+                nk_label_colored_wrap(c, "No serial ports found.", t->warn);
+            }
+            nk_group_end(c);
+        }
+        nk_layout_row_template_begin(c, S(ui, 30));
+        nk_layout_row_template_push_static(c, S(ui, 110));
+        nk_layout_row_template_push_static(c, S(ui, 120));
+        nk_layout_row_template_push_dynamic(c);
+        nk_layout_row_template_end(c);
+        if (nk_button_label(c, "Rescan")) {
+            ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
+            ui->gps_sel_port = 0;
+        }
+        char baud_names[N_BAUD][12];
+        const char *baud_ptr[N_BAUD];
+        for (int i = 0; i < N_BAUD; i++) {
+            snprintf(baud_names[i], sizeof baud_names[i], "%d", BAUDS[i]);
+            baud_ptr[i] = baud_names[i];
+        }
+        ui->gps_baud_idx = nk_combo(c, baud_ptr, N_BAUD, ui->gps_baud_idx,
+                                    (int)S(ui, 24), nk_vec2(S(ui, 120), S(ui, 220)));
+        nk_spacing(c, 1);
+    } else if (ui->gps_source == MV_GPS_UDP) {
+        gap(ui, 4);
+        section(ui, "UDP port");
+        form_row(ui, ROW_H);
+        nk_label_colored(c, "Listen on port", NK_TEXT_RIGHT, t->text_dim);
+        nk_edit_string_zero_terminated(c, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER,
+                                       ui->gps_udp_str, sizeof ui->gps_udp_str,
+                                       nk_filter_decimal);
+        nk_layout_row_dynamic(c, S(ui, 20), 1);
+        nk_label_colored(c, "NMEA over IP is conventionally port 10110.",
+                         NK_TEXT_LEFT, t->text_faint);
+    }
+
+    gap(ui, 6);
+    section(ui, "Current");
+    if (st->gps_source == MV_GPS_INTERLEAVED)
+        info_row(ui, "Source", "mag serial line");
+    else if (st->gps_source == MV_GPS_SERIAL)
+        info_rowf(ui, "Source", "serial %s @ %d %s", st->gps_port, st->gps_baud,
+                  st->gps_link_open ? "(open)" : "(not open)");
+    else
+        info_rowf(ui, "Source", "UDP :%d %s", st->gps_udp_port,
+                  st->gps_link_open ? "(listening)" : "(not open)");
+    info_row(ui, "Fix", st->status.has_fix ? "present" : "none yet");
+    if (st->gps_error[0]) {
+        nk_layout_row_dynamic(c, S(ui, 30), 1);
+        nk_label_colored_wrap(c, st->gps_error, t->alarm);
+    }
+}
+
+static void dlg_gps_commit(MvUi *ui, DlgResult r)
+{
+    if (r == DLG_R_CANCEL) {
+        ui->dialog = DLG_NONE;
+        return;
+    }
+    if (r != DLG_R_OK && r != DLG_R_APPLY)
+        return;
+
+    const char *port = (ui->n_ports > 0) ? ui->ports[ui->gps_sel_port].path : "";
+    int udp = atoi(ui->gps_udp_str);
+    const char *err = mv_app_set_gps(ui->app, ui->gps_source, port,
+                                     BAUDS[ui->gps_baud_idx], udp);
+    if (err) {
+        ui->dlg_note[0] = '\0';
+        snprintf(ui->dlg_error, sizeof ui->dlg_error, "%s", err);
+    } else {
+        ui->dlg_error[0] = '\0';
+        if (r == DLG_R_OK)
+            ui->dialog = DLG_NONE;
+        else
+            snprintf(ui->dlg_note, sizeof ui->dlg_note, "GPS source updated.");
+    }
+}
+
+static bool dlg_gps_ready(MvUi *ui)
+{
+    if (ui->gps_source == MV_GPS_SERIAL)
+        return ui->n_ports > 0;
+    if (ui->gps_source == MV_GPS_UDP) {
+        int p = atoi(ui->gps_udp_str);
+        return p > 0 && p <= 65535;
+    }
+    return true;
+}
+
 static void dlg_about_body(MvUi *ui)
 {
     struct nk_context *c = ui->ctx;
@@ -1021,6 +1180,7 @@ static const char *dialog_title(MvDialog d)
 {
     switch (d) {
     case DLG_CONNECT: return "Connect to the Explorer";
+    case DLG_GPS:     return "GPS source";
     case DLG_ABOUT:   return "About " MAGVIEW_NAME;
     default:          return "";
     }
@@ -1030,6 +1190,7 @@ static struct nk_vec2 dialog_size(MvDialog d)
 {
     switch (d) {
     case DLG_CONNECT: return nk_vec2(560, 380);
+    case DLG_GPS:     return nk_vec2(580, 520);
     case DLG_ABOUT:   return nk_vec2(600, 520);
     default:          return nk_vec2(500, 300);
     }
@@ -1088,6 +1249,7 @@ static void draw_dialog(MvUi *ui, int w, int h)
             struct nk_rect topb = nk_layout_widget_bounds(c);
             switch (ui->dialog) {
             case DLG_CONNECT: dlg_connect_body(ui); break;
+            case DLG_GPS:     dlg_gps_body(ui);     break;
             case DLG_ABOUT:   dlg_about_body(ui);   break;
             default: break;
             }
@@ -1115,8 +1277,12 @@ static void draw_dialog(MvUi *ui, int w, int h)
             res = primary_button(ui, "OK") ? DLG_R_OK : DLG_R_NONE;
             if (res == DLG_R_OK)
                 ui->dialog = DLG_NONE;
+        } else if (ui->dialog == DLG_GPS) {
+            res = dialog_buttons(ui, dlg_gps_ready(ui), "Save");
+            if (res != DLG_R_NONE)
+                dlg_gps_commit(ui, res);
         } else {
-            res = dialog_buttons(ui, dlg_connect_ready(ui));
+            res = dialog_buttons(ui, dlg_connect_ready(ui), "Connect");
             if (res != DLG_R_NONE)
                 dlg_connect_commit(ui, res);
         }

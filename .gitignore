@@ -1,0 +1,11 @@
+*.o
+*.d
+*.exe
+magview
+tests/test_*
+!tests/test_*.c
+build/
+*.log
+*.csv
+*.raw
+third_party/*.o

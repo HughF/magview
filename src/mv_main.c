@@ -25,6 +25,7 @@
 
 #include "mv_app.h"
 #include "mv_ui.h"
+#include "mv_help.h"
 #include "mv_version.h"
 
 #define BASE_W 1280
@@ -37,7 +38,8 @@ static void usage(void)
            "  --sim            run against a simulated instrument\n"
            "  --port DEV       open this serial port at startup\n"
            "  --baud N         baud rate for --port (default 9600)\n"
-           "  --help           this message\n\n"
+           "  --help           this message\n"
+           "  --help-doc       write the built-in manual to stdout as Markdown\n\n"
            "Environment:\n"
            "  MAGVIEW_SCALE    override the HiDPI UI scale (e.g. 2)\n");
 }
@@ -57,6 +59,11 @@ int main(int argc, char **argv)
             baud = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             usage();
+            return 0;
+        } else if (strcmp(argv[i], "--help-doc") == 0) {
+            /* Before SDL is touched, so docs/HELP.md can be regenerated in a
+             * headless build. */
+            mv_help_write_markdown(stdout, MAGVIEW_VERSION);
             return 0;
         } else {
             fprintf(stderr, "magview: unknown argument '%s'\n", argv[i]);

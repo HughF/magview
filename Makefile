@@ -44,7 +44,7 @@ SDL_LIBS   := $(shell sdl2-config --libs 2>/dev/null)
 # ---------------------------------------------------------------------
 
 # Portable core plus the app: no SDL, and the unit tests link against these.
-CORE = mv_geo mv_proto mv_log mv_config mv_sim mv_app
+CORE = mv_geo mv_proto mv_log mv_config mv_sim mv_app mv_help
 
 ifeq ($(OS),Windows_NT)
     PLAT = plat_win32
@@ -60,7 +60,7 @@ TARGET = magview
 
 TESTS = test_proto test_geo test_log test_config
 
-.PHONY: all clean test debug windows run
+.PHONY: all clean test debug windows run help-doc
 
 all: $(TARGET)
 
@@ -109,6 +109,13 @@ debug: clean $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET) --sim
+
+# The manual lives in src/mv_help.c and is rendered two ways: the Help page
+# draws it, and this writes it out. docs/HELP.md is generated — do not edit it
+# by hand.
+help-doc: $(TARGET)
+	./$(TARGET) --help-doc > docs/HELP.md
+	@echo "docs/HELP.md regenerated"
 
 windows:
 	$(MAKE) CC=x86_64-w64-mingw32-gcc OS=Windows_NT \

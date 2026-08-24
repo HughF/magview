@@ -28,6 +28,7 @@
 #include "mv_plot.h"
 #include "mv_chart.h"
 #include "mv_geo.h"
+#include "mv_help.h"
 #include "mv_version.h"
 
 #include <stdio.h>
@@ -50,12 +51,21 @@
 #define WIN_MAX_FRAC 0.85f
 
 typedef enum {
-    PAGE_FIELD = 0, PAGE_CHART, PAGE_LOG, PAGE_CONSOLE,
+    PAGE_FIELD = 0, PAGE_CHART, PAGE_LOG, PAGE_CONSOLE, PAGE_HELP,
     PAGE_COUNT
 } MvPage;
 
 static const char *PAGE_NAME[PAGE_COUNT] = {
-    "Field", "Chart", "Log", "Console"
+    "Field", "Chart", "Log", "Console", "Help"
+};
+
+/* One-line hint for each rail page, shown on hover. */
+static const char *PAGE_HINT[PAGE_COUNT] = {
+    "The scrolling total-field strip, with optional depth and signal",
+    "Plan view of the survey track, optionally posted by field",
+    "Write every reading to a georeferenced CSV",
+    "Every line the instrument sent, verbatim",
+    "The manual, and what every control does (F1)"
 };
 
 typedef enum { DLG_NONE = 0, DLG_CONNECT, DLG_GPS, DLG_ABOUT } MvDialog;
@@ -112,6 +122,13 @@ struct MvUi {
     /* console follow-tail */
     int      con_seen;
 
+    /* tooltips. tip_text is this frame's candidate, tip_shown the one the
+     * dwell timer is counting against. */
+    char     tip_text[256];
+    struct nk_rect tip_over;
+    char     tip_shown[256];
+    uint64_t tip_since_ms;
+
     /* dialog auto-sizing */
     MvDialog dlg_measured;
     float    dlg_natural_h;
@@ -125,6 +142,180 @@ struct MvUi {
 /* ------------------------------------------------------------------ */
 
 static float S(const MvUi *ui, float v) { return v * ui->scale; }
+
+/* ------------------------------------------------------------------ */
+/* Tooltips                                                            */
+/*                                                                     */
+/* Every control that does something says what it does when the pointer */
+/* rests on it. tip() is called immediately before the widget, the way  */
+/* Nuklear's nk_widget_is_hovered() idiom works, because the bounds     */
+/* tested are the ones the *next* widget will occupy.                  */
+/*                                                                     */
+/* Nuklear's own nk_tooltip() is not usable here: it draws into the     */
+/* current window, so a hint on the narrow rail is cut off at its edge, */
+/* and it only reports a hover for the focused window, which the rail   */
+/* is not until it has been clicked. This draws into the overlay buffer */
+/* instead, which is linked in last and belongs to no window.          */
+/* ------------------------------------------------------------------ */
+
+#define TIP_DELAY_MS  700       /* dwell before a hint appears           */
+#define TIP_MAX_W     320.0f    /* unscaled; wider than this it wraps    */
+#define TIP_MAX_LINES 4
+
+typedef struct { int off, len; } MvTipLine;
+
+static float tip_text_w(const MvUi *ui, const char *s, int len)
+{
+    const struct nk_user_font *f = ui->ctx->style.font;
+    if (!f || len <= 0)
+        return 0.0f;
+    return f->width(f->userdata, f->height, s, len);
+}
+
+/* Greedy word wrap, the same rule Nuklear applies to a wrapped label. Returns
+ * the line count and, if out is non-NULL, the first max_out line spans. */
+static int wrap_text(const MvUi *ui, const char *s, float w,
+                     MvTipLine *out, int max_out)
+{
+    float space = tip_text_w(ui, " ", 1);
+    int lines = 0, start = 0, i = 0;
+    float cur = 0.0f;
+
+    while (s[i]) {
+        int ws = i;
+        while (s[i] && s[i] != ' ')
+            i++;
+        float word = tip_text_w(ui, s + ws, i - ws);
+
+        if (cur > 0.0f && cur + space + word > w) {
+            if (out && lines < max_out) {
+                out[lines].off = start;
+                out[lines].len = ws - 1 - start;   /* drop the space */
+            }
+            lines++;
+            start = ws;
+            cur = word;
+        } else {
+            cur += (cur > 0.0f ? space : 0.0f) + word;
+        }
+        while (s[i] == ' ')
+            i++;
+    }
+
+    if (out && lines < max_out) {
+        out[lines].off = start;
+        out[lines].len = i - start;
+    }
+    return lines + 1;
+}
+
+/* Height a wrapped label needs for `text` in a column `w` wide. */
+static float wrap_height(const MvUi *ui, const char *text, float w)
+{
+    int n = wrap_text(ui, text, w, NULL, 0);
+    return (float)n * (ui->ctx->style.font->height + S(ui, 4));
+}
+
+/*
+ * Register a hint for the widget about to be laid out. The last one
+ * registered in a frame wins, so the innermost widget under the pointer is
+ * the one that speaks.
+ */
+static void tip(MvUi *ui, const char *text)
+{
+    struct nk_context *c = ui->ctx;
+
+    if (!text || !text[0] || !c->current || !c->current->layout)
+        return;
+    if (c->current->popup.active)
+        return;                    /* a dropdown is covering what is under it */
+    if (c->input.mouse.buttons[NK_BUTTON_LEFT].down)
+        return;                    /* nothing pops up mid-click */
+
+    struct nk_rect b = nk_widget_bounds(c);
+    struct nk_rect clip = c->current->layout->clip;
+
+    if (!nk_input_is_mouse_hovering_rect(&c->input, b) ||
+        !nk_input_is_mouse_hovering_rect(&c->input, clip))
+        return;
+
+    snprintf(ui->tip_text, sizeof ui->tip_text, "%s", text);
+    ui->tip_over = b;
+}
+
+/* Draw the hint the pointer has rested on, after every window is finished. It
+ * goes in ctx->overlay, the buffer Nuklear links in last, so it can hang over
+ * a panel edge and sit above a dialog. */
+static void tip_draw(MvUi *ui, int w, int h)
+{
+    struct nk_context *c = ui->ctx;
+    const MvTheme *t = ui->theme;
+
+    if (!ui->tip_text[0]) {
+        ui->tip_shown[0] = '\0';
+        return;
+    }
+
+    /* Dwell against the text, not the pointer: sliding along a row of buttons
+     * re-arms it, moving within one control does not. */
+    if (strcmp(ui->tip_text, ui->tip_shown) != 0) {
+        snprintf(ui->tip_shown, sizeof ui->tip_shown, "%s", ui->tip_text);
+        ui->tip_since_ms = plat_now_ms();
+        return;
+    }
+    if (plat_now_ms() - ui->tip_since_ms < TIP_DELAY_MS)
+        return;
+
+    MvTipLine ln[TIP_MAX_LINES];
+    int n = wrap_text(ui, ui->tip_shown, S(ui, TIP_MAX_W), ln, TIP_MAX_LINES);
+    if (n > TIP_MAX_LINES)
+        n = TIP_MAX_LINES;
+
+    float lh = c->style.font->height + S(ui, 3);
+    float pad_x = S(ui, 9), pad_y = S(ui, 6);
+    float tw = 0.0f;
+    for (int i = 0; i < n; i++) {
+        float lw = tip_text_w(ui, ui->tip_shown + ln[i].off, ln[i].len);
+        if (lw > tw) tw = lw;
+    }
+
+    struct nk_rect r;
+    r.w = tw + pad_x * 2.0f;
+    r.h = (float)n * lh + pad_y * 2.0f;
+
+    /* Below the control it belongs to, flipping above when there is no room,
+     * anchored to the control rather than the pointer so it does not jitter. */
+    r.x = ui->tip_over.x;
+    r.y = ui->tip_over.y + ui->tip_over.h + S(ui, 6);
+    if (r.y + r.h > (float)h - S(ui, 4))
+        r.y = ui->tip_over.y - r.h - S(ui, 6);
+    if (r.y < S(ui, 4))
+        r.y = S(ui, 4);
+    if (r.x + r.w > (float)w - S(ui, 4))
+        r.x = (float)w - r.w - S(ui, 4);
+    if (r.x < S(ui, 4))
+        r.x = S(ui, 4);
+
+    struct nk_command_buffer *cb = &c->overlay;
+    nk_command_buffer_init(cb, &c->memory, NK_CLIPPING_ON);
+    nk_start_buffer(c, cb);
+    nk_push_scissor(cb, nk_rect(0, 0, (float)w, (float)h));
+
+    float rad = S(ui, 3);
+    nk_fill_rect(cb, nk_rect(r.x + S(ui, 2), r.y + S(ui, 2), r.w, r.h),
+                 rad, nk_rgba(0, 0, 0, t->is_light ? 36 : 90));
+    nk_fill_rect(cb, r, rad, t->panel_alt);
+    nk_stroke_rect(cb, r, rad, 1.0f, t->border);
+
+    for (int i = 0; i < n; i++) {
+        struct nk_rect lr = nk_rect(r.x + pad_x, r.y + pad_y + (float)i * lh,
+                                    tw, lh);
+        nk_draw_text(cb, lr, ui->tip_shown + ln[i].off, ln[i].len,
+                     c->style.font, t->panel_alt, t->text);
+    }
+
+    nk_finish_buffer(c, cb);
+}
 
 static void form_row(MvUi *ui, float h)
 {
@@ -332,6 +523,7 @@ static void draw_rail(MvUi *ui, struct nk_rect r)
     if (nk_begin(c, "rail", r, NK_WINDOW_NO_SCROLLBAR)) {
         for (int i = 0; i < PAGE_COUNT; i++) {
             nk_layout_row_dynamic(c, S(ui, 32), 1);
+            tip(ui, PAGE_HINT[i]);
             nk_bool on = (ui->page == (MvPage)i);
             if (nk_selectable_label(c, PAGE_NAME[i], NK_TEXT_LEFT, &on) && on)
                 ui->page = (MvPage)i;
@@ -342,9 +534,12 @@ static void draw_rail(MvUi *ui, struct nk_rect r)
         if (!st->simulate) {
             nk_layout_row_dynamic(c, S(ui, 30), 1);
             if (st->link == MV_LINK_OPEN) {
+                tip(ui, "Close the serial port. The instrument carries on "
+                        "regardless");
                 if (nk_button_label(c, "Disconnect"))
                     mv_app_disconnect(ui->app);
             } else {
+                tip(ui, "Open the serial port the Explorer's cable is on");
                 if (nk_button_label(c, "Connect...")) {
                     ui->dlg_error[0] = ui->dlg_note[0] = '\0';
                     ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
@@ -355,6 +550,8 @@ static void draw_rail(MvUi *ui, struct nk_rect r)
         }
 
         nk_layout_row_dynamic(c, S(ui, 30), 1);
+        tip(ui, "Choose where the position fix comes from: the mag line, a "
+                "separate serial port, or UDP");
         if (nk_button_label(c, "GPS source...")) {
             ui->dlg_error[0] = ui->dlg_note[0] = '\0';
             ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
@@ -373,15 +570,20 @@ static void draw_rail(MvUi *ui, struct nk_rect r)
         }
 
         nk_layout_row_dynamic(c, S(ui, 30), 1);
+        tip(ui, "Forget the buffered readings and the track. Does not touch "
+                "the log");
         if (nk_button_label(c, "Clear"))
             mv_app_clear(ui->app);
 
         gap(ui, 8);
         nk_layout_row_dynamic(c, S(ui, 30), 1);
+        tip(ui, "Version, build and licence");
         if (nk_button_label(c, "About..."))
             ui->dialog = DLG_ABOUT;
 
         nk_layout_row_dynamic(c, S(ui, 30), 1);
+        tip(ui, ui->dark ? "Switch to the light theme, for daylight on deck"
+                         : "Switch to the dark theme, for a night bridge");
         if (nk_button_label(c, ui->dark ? "Light theme" : "Dark theme"))
             ui->theme_toggle = true;
     }
@@ -468,12 +670,15 @@ static void page_field(MvUi *ui, struct nk_rect r)
     nk_layout_row_template_end(c);
 
     nk_label_colored(c, "Window", NK_TEXT_RIGHT, t->text_dim);
+    tip(ui, "How many seconds of history the strips show at once");
     ui->win_idx = nk_combo(c, WINDOW_NAME, N_WINDOW, ui->win_idx,
                            (int)S(ui, 24),
                            nk_vec2(S(ui, 120), S(ui, 200)));
 
     nk_bool sd = ui->show_depth, ss = ui->show_signal;
+    tip(ui, "Add a towfish-depth strip below the field, on the same time axis");
     nk_checkbox_label(c, "Depth strip", &sd);
+    tip(ui, "Add a signal-strength strip, to watch the reading quality");
     nk_checkbox_label(c, "Signal strip", &ss);
     ui->show_depth = sd;
     ui->show_signal = ss;
@@ -573,21 +778,27 @@ static void page_chart(MvUi *ui, struct nk_rect r)
     nk_layout_row_template_push_dynamic(c);
     nk_layout_row_template_end(c);
 
+    tip(ui, "Set the view to contain the whole track");
     if (nk_button_label(c, "Fit"))
         mv_chart_request_fit(&ui->chart);
 
     struct nk_vec2 centre = nk_vec2(ui->chart_info.plot.x + ui->chart_info.plot.w / 2,
                                     ui->chart_info.plot.y + ui->chart_info.plot.h / 2);
+    tip(ui, "Zoom in about the middle. The wheel zooms about the pointer");
     if (nk_button_label(c, "+"))
         mv_chart_zoom(&ui->chart, &ui->chart_info, 2.0, centre);
+    tip(ui, "Zoom out about the middle");
     if (nk_button_label(c, "-"))
         mv_chart_zoom(&ui->chart, &ui->chart_info, 0.5, centre);
 
     nk_bool cf = ui->chart.colour_field;
+    tip(ui, "Post each fix by its departure from the survey mean — cool low, "
+            "warm high");
     nk_checkbox_label(c, "Colour by field", &cf);
     ui->chart.colour_field = cf;
 
     nk_bool follow = ui->chart.follow;
+    tip(ui, "Keep the live position centred as the boat moves");
     nk_checkbox_label(c, "Follow", &follow);
     if (follow && !live)
         follow = nk_false;
@@ -725,12 +936,14 @@ static void page_log(MvUi *ui, struct nk_rect r)
 
     form_row(ui, ROW_H);
     nk_label_colored(ui->ctx, "Folder", NK_TEXT_RIGHT, t->text_dim);
+    tip(ui, "Where the CSV is written. Defaults to your Documents folder");
     nk_edit_string_zero_terminated(c, NK_EDIT_FIELD, ui->log_dir,
                                    sizeof ui->log_dir, nk_filter_default);
 
     form_row(ui, ROW_H);
     nk_label_colored(ui->ctx, "", NK_TEXT_RIGHT, t->text_dim);
     nk_bool raw = ui->log_raw;
+    tip(ui, "Also write every serial line verbatim to a .raw file");
     nk_checkbox_label(c, "Also keep the raw serial (.raw)", &raw);
     ui->log_raw = raw;
 
@@ -743,6 +956,7 @@ static void page_log(MvUi *ui, struct nk_rect r)
     nk_layout_row_template_end(c);
     nk_spacing(c, 1);
     if (!st->logging) {
+        tip(ui, "Open a new CSV log and begin writing one row per reading");
         if (primary_button(ui, "Start logging")) {
             const char *err = mv_app_log_start(ui->app, ui->log_dir, ui->log_raw);
             if (err) {
@@ -753,6 +967,7 @@ static void page_log(MvUi *ui, struct nk_rect r)
             }
         }
     } else {
+        tip(ui, "Close the log file");
         if (nk_button_label(c, "Stop logging"))
             mv_app_log_stop(ui->app);
     }
@@ -881,6 +1096,120 @@ static void page_console(MvUi *ui, struct nk_rect r)
 }
 
 /* ------------------------------------------------------------------ */
+/* Help page                                                           */
+/* ------------------------------------------------------------------ */
+
+static void page_help(MvUi *ui, struct nk_rect r)
+{
+    struct nk_context *c = ui->ctx;
+    const MvTheme *t = ui->theme;
+    (void)r;
+
+    struct nk_rect region = nk_window_get_content_region(c);
+    float avail = region.w - c->style.text.padding.x * 2.0f - S(ui, 6);
+    float col = S(ui, 720.0f);
+    if (col > avail) col = avail;
+    if (col < S(ui, 200)) col = S(ui, 200);
+
+    float key_w = S(ui, 190.0f);
+    float val_w = col - key_w - c->style.window.spacing.x;
+    if (val_w < S(ui, 120)) {
+        key_w = col * 0.35f;
+        val_w = col - key_w - c->style.window.spacing.x;
+    }
+
+    float ind_w = S(ui, 18.0f);
+    float bul_w = col - ind_w - c->style.window.spacing.x;
+
+    /* One column `col` wide, and nothing after it — not a trailing dynamic
+     * spacer, which nk_spacing turns into a second full row and riddles the
+     * page with holes. */
+    #define HELP_ROW1(h)  do {                                       \
+        nk_layout_row_template_begin(c, (h));                        \
+        nk_layout_row_template_push_static(c, col);                  \
+        nk_layout_row_template_end(c);                               \
+    } while (0)
+
+    nk_layout_row_dynamic(c, S(ui, 30), 1);
+    nk_label_colored(c, MAGVIEW_NAME "  " MAGVIEW_VERSION "  \xe2\x80\x94  manual",
+                     NK_TEXT_LEFT, t->accent);
+
+    HELP_ROW1(wrap_height(ui, "x", col));
+    nk_label_colored(c,
+        "F1 opens this page. Rest the pointer on any control for a one-line "
+        "version of what it does.", NK_TEXT_LEFT, t->text_dim);
+
+    int n_sec = 0;
+    const MvHelpSection *sec = mv_help_sections(&n_sec);
+
+    for (int i = 0; i < n_sec; i++) {
+        gap(ui, 12);
+        nk_layout_row_dynamic(c, S(ui, 24), 1);
+        nk_label_colored(c, sec[i].title, NK_TEXT_LEFT, t->accent);
+
+        if (sec[i].intro) {
+            HELP_ROW1(wrap_height(ui, sec[i].intro, col));
+            nk_label_colored_wrap(c, sec[i].intro, t->text_dim);
+        }
+
+        for (int k = 0; k < sec[i].n_items; k++) {
+            const MvHelpItem *e = &sec[i].items[k];
+
+            switch (e->kind) {
+            case MV_HELP_TEXT:
+                HELP_ROW1(wrap_height(ui, e->a, col));
+                nk_label_colored_wrap(c, e->a, t->text_dim);
+                break;
+
+            case MV_HELP_SUB:
+                gap(ui, 4);
+                nk_layout_row_dynamic(c, S(ui, 22), 1);
+                nk_label_colored(c, e->a, NK_TEXT_LEFT, t->text);
+                break;
+
+            case MV_HELP_BULLET:
+                nk_layout_row_template_begin(c, wrap_height(ui, e->a, bul_w));
+                nk_layout_row_template_push_static(c, ind_w);
+                nk_layout_row_template_push_static(c, bul_w);
+                nk_layout_row_template_end(c);
+                nk_label_colored(c, "\xc2\xb7",
+                                 NK_TEXT_ALIGN_RIGHT | NK_TEXT_ALIGN_TOP,
+                                 t->text_faint);
+                nk_label_colored_wrap(c, e->a, t->text_dim);
+                break;
+
+            case MV_HELP_ROW: {
+                float hgt = wrap_height(ui, e->b ? e->b : "", val_w);
+                nk_layout_row_template_begin(c, hgt);
+                nk_layout_row_template_push_static(c, key_w);
+                nk_layout_row_template_push_static(c, val_w);
+                nk_layout_row_template_end(c);
+                nk_label_colored(c, e->a,
+                                 NK_TEXT_ALIGN_RIGHT | NK_TEXT_ALIGN_TOP,
+                                 t->text);
+                nk_label_colored_wrap(c, e->b ? e->b : "", t->text_dim);
+                break;
+            }
+
+            case MV_HELP_NOTE:
+                HELP_ROW1(wrap_height(ui, e->a, col));
+                nk_label_colored_wrap(c, e->a, t->warn);
+                break;
+            }
+        }
+    }
+
+    gap(ui, 14);
+    HELP_ROW1(wrap_height(ui, "x", col));
+    nk_label_colored(c,
+        "The same text is written to docs/HELP.md by: magview --help-doc",
+        NK_TEXT_LEFT, t->text_faint);
+    gap(ui, 10);
+
+    #undef HELP_ROW1
+}
+
+/* ------------------------------------------------------------------ */
 /* Dialogs                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -896,9 +1225,11 @@ static DlgResult dialog_buttons(MvUi *ui, bool can_apply, const char *primary)
     nk_layout_row_template_end(c);
 
     nk_spacing(c, 1);
+    tip(ui, "Discard the changes and close. Escape does the same");
     if (nk_button_label(c, "Cancel"))
         res = DLG_R_CANCEL;
     if (!can_apply) nk_widget_disable_begin(c);
+    tip(ui, can_apply ? "Commit and close" : "Nothing to commit yet");
     if (primary_button(ui, primary) && can_apply)
         res = DLG_R_OK;
     if (!can_apply) nk_widget_disable_end(c);
@@ -954,6 +1285,7 @@ static void dlg_connect_body(MvUi *ui)
     nk_layout_row_template_push_static(c, S(ui, 120));
     nk_layout_row_template_push_dynamic(c);
     nk_layout_row_template_end(c);
+    tip(ui, "Look for serial ports again");
     if (nk_button_label(c, "Rescan")) {
         ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
         ui->sel_port = 0;
@@ -964,6 +1296,7 @@ static void dlg_connect_body(MvUi *ui)
         snprintf(baud_names[i], sizeof baud_names[i], "%d", BAUDS[i]);
         baud_ptr[i] = baud_names[i];
     }
+    tip(ui, "Serial baud rate. The Explorer default is 9600");
     ui->sel_baud = nk_combo(c, baud_ptr, N_BAUD, ui->sel_baud,
                             (int)S(ui, 24), nk_vec2(S(ui, 120), S(ui, 220)));
     nk_spacing(c, 1);
@@ -1010,14 +1343,17 @@ static void dlg_gps_body(MvUi *ui)
     section(ui, "Source");
 
     nk_layout_row_dynamic(c, S(ui, 24), 1);
+    tip(ui, "The Explorer passes NMEA GPS through its own serial output");
     if (nk_option_label(c, "Interleaved on the mag serial line",
                         ui->gps_source == MV_GPS_INTERLEAVED))
         ui->gps_source = MV_GPS_INTERLEAVED;
     nk_layout_row_dynamic(c, S(ui, 24), 1);
+    tip(ui, "A second GPS device on its own serial port");
     if (nk_option_label(c, "A separate serial port",
                         ui->gps_source == MV_GPS_SERIAL))
         ui->gps_source = MV_GPS_SERIAL;
     nk_layout_row_dynamic(c, S(ui, 24), 1);
+    tip(ui, "NMEA position over the network, e.g. from a navigation PC");
     if (nk_option_label(c, "UDP network (NMEA over IP)",
                         ui->gps_source == MV_GPS_UDP))
         ui->gps_source = MV_GPS_UDP;
@@ -1048,6 +1384,7 @@ static void dlg_gps_body(MvUi *ui)
         nk_layout_row_template_push_static(c, S(ui, 120));
         nk_layout_row_template_push_dynamic(c);
         nk_layout_row_template_end(c);
+        tip(ui, "Look for serial ports again");
         if (nk_button_label(c, "Rescan")) {
             ui->n_ports = plat_serial_list(ui->ports, PLAT_MAX_PORTS);
             ui->gps_sel_port = 0;
@@ -1058,6 +1395,7 @@ static void dlg_gps_body(MvUi *ui)
             snprintf(baud_names[i], sizeof baud_names[i], "%d", BAUDS[i]);
             baud_ptr[i] = baud_names[i];
         }
+        tip(ui, "GPS baud rate. The classic NMEA GPS rate is 4800");
         ui->gps_baud_idx = nk_combo(c, baud_ptr, N_BAUD, ui->gps_baud_idx,
                                     (int)S(ui, 24), nk_vec2(S(ui, 120), S(ui, 220)));
         nk_spacing(c, 1);
@@ -1066,6 +1404,7 @@ static void dlg_gps_body(MvUi *ui)
         section(ui, "UDP port");
         form_row(ui, ROW_H);
         nk_label_colored(c, "Listen on port", NK_TEXT_RIGHT, t->text_dim);
+        tip(ui, "UDP port to receive NMEA on. Conventionally 10110");
         nk_edit_string_zero_terminated(c, NK_EDIT_FIELD | NK_EDIT_SIG_ENTER,
                                        ui->gps_udp_str, sizeof ui->gps_udp_str,
                                        nk_filter_decimal);
@@ -1201,6 +1540,10 @@ static void draw_dialog(MvUi *ui, int w, int h)
     struct nk_context *c = ui->ctx;
     const MvTheme *t = ui->theme;
 
+    /* The page behind is unreachable, so nothing on it may answer for the
+     * pointer. Anything registered before now was drawn under the scrim. */
+    ui->tip_text[0] = '\0';
+
     nk_style_push_style_item(c, &c->style.window.fixed_background,
                              nk_style_item_color(t->scrim));
     if (nk_begin(c, "scrim", nk_rect(0, 0, (float)w, (float)h),
@@ -1329,6 +1672,9 @@ void mv_ui_frame(MvUi *ui, int w, int h)
 
     update_title(ui);
 
+    /* This frame's hint is collected as the controls are laid out. */
+    ui->tip_text[0] = '\0';
+
     float sh = S(ui, STATUS_H);
     float ah = S(ui, ACTION_H);
     float rw = S(ui, RAIL_W);
@@ -1344,8 +1690,9 @@ void mv_ui_frame(MvUi *ui, int w, int h)
 
     nk_style_push_style_item(c, &c->style.window.fixed_background,
                              nk_style_item_color(ui->theme->bg));
+    bool scrolls = (ui->page == PAGE_LOG || ui->page == PAGE_HELP);
     if (nk_begin(c, "content", content,
-                 (ui->page == PAGE_LOG) ? 0 : NK_WINDOW_NO_SCROLLBAR)) {
+                 scrolls ? 0 : NK_WINDOW_NO_SCROLLBAR)) {
         if (ui->page != ui->last_page) {
             nk_window_set_scroll(c, 0, 0);
             ui->last_page = ui->page;
@@ -1356,6 +1703,7 @@ void mv_ui_frame(MvUi *ui, int w, int h)
         case PAGE_CHART:   page_chart(ui, inner);   break;
         case PAGE_LOG:     page_log(ui, inner);     break;
         case PAGE_CONSOLE: page_console(ui, inner); break;
+        case PAGE_HELP:    page_help(ui, inner);    break;
         default: break;
         }
     }
@@ -1364,6 +1712,8 @@ void mv_ui_frame(MvUi *ui, int w, int h)
 
     if (ui->dialog != DLG_NONE)
         draw_dialog(ui, w, h);
+
+    tip_draw(ui, w, h);
 }
 
 static float detect_scale(SDL_Window *win, SDL_Renderer *ren)
@@ -1505,6 +1855,11 @@ bool mv_ui_handle_event(MvUi *ui, SDL_Event *e)
     if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_ESCAPE &&
         ui->dialog != DLG_NONE) {
         ui->dialog = DLG_NONE;
+        return true;
+    }
+    if (e->type == SDL_KEYDOWN && e->key.keysym.sym == SDLK_F1) {
+        ui->dialog = DLG_NONE;
+        ui->page = PAGE_HELP;
         return true;
     }
     return nk_sdl_handle_event(e) != 0;

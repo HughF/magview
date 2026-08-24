@@ -6,6 +6,12 @@ All notable changes to magview. Dates are ISO-8601. Versioning is date-based
 ## [Unreleased]
 
 ### Added
+- **Mouseover tooltips**: rest the pointer on any control for a one-line
+  description. Drawn into the overlay buffer (not `nk_tooltip`) so a hint on
+  the narrow rail is not clipped, with a short dwell before it appears.
+- **Help page** (rail → *Help*, or **F1**): the manual, rendered from a single
+  source (`src/mv_help.c`). `magview --help-doc` / `make help-doc` writes the
+  same text to `docs/HELP.md`, so the in-app help and the file cannot drift.
 - **GPS source** dialog (rail → *GPS source…*): the position fix can come from
   the mag serial line (interleaved, as before), a **separate serial port**, or
   **UDP** network NMEA (default port 10110). The choice is persisted to

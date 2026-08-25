@@ -30,7 +30,25 @@ to use on a boat:
 - **Console** — every line the instrument sent, for when you need to see the
   wire.
 
-## Building
+## Installing
+
+Prebuilt binaries are on the [releases page][rel]. Nothing needs installing —
+each is self-contained.
+
+- **Windows** — download `magview-<version>-win64.zip`, unzip it anywhere, and
+  run `magview.exe`. `SDL2.dll` sits beside it in the folder; keep the two
+  together. 64-bit Windows 7 or newer.
+- **Linux** — download `magview-<version>-x86_64.AppImage`, `chmod +x` it, and
+  run it. It bundles SDL2 and carries its own font, so it runs on any glibc
+  2.35 or newer distribution (Ubuntu 22.04, Debian 12, Fedora 36 and up) with
+  no dependencies to install.
+- **macOS** — build from source (below); it is a handful of seconds.
+
+Check a download against `SHA256SUMS.txt`: `sha256sum -c SHA256SUMS.txt`.
+
+[rel]: https://github.com/HughF/magview/releases
+
+## Building from source
 
 Dependencies: **SDL2 only**. Nuklear is vendored in `third_party/`.
 
@@ -44,8 +62,38 @@ macOS           brew install sdl2
 make            # build ./magview
 make run        # build and launch against the simulator
 make test       # unit tests, sanitised (ASan + UBSan)
-make windows    # cross-compile with mingw-w64
+make help-doc   # regenerate docs/HELP.md from the built-in manual
 ```
+
+### Cross-compiling for Windows
+
+The Windows build is a mingw-w64 cross-compile from Linux; it needs no Windows
+machine. It statically links everything except SDL2, so the only file to ship
+beside `magview.exe` is `SDL2.dll`.
+
+```
+sudo pacman -S --needed mingw-w64-gcc     # Arch; on Debian/Ubuntu: mingw-w64
+tools/win/get-sdl2.sh                      # fetch the SDL2 mingw SDK (once)
+
+make windows        # -> magview.exe
+make windows-dist   # -> dist/magview-<version>-win64.zip (exe + DLL + docs)
+```
+
+The `.exe` carries an icon, a version stamp (read from `src/mv_version.h`, so
+the Properties tab and the About box always agree) and a per-monitor
+DPI-aware manifest, all built by `tools/win/magview.rc`.
+
+### Packaging a release
+
+```
+make appimage       # -> dist/magview-<version>-x86_64.AppImage
+make release        # windows-dist + appimage + dist/SHA256SUMS.txt
+```
+
+`make appimage` builds against an older glibc inside bubblewrap (no root, no
+container runtime) and bundles a `dlopen`-backend SDL2 built from source, so
+the result starts on stable distributions rather than binding symbol versions
+only the build box has. See `tools/linux/make-appimage.sh`.
 
 ## Running
 

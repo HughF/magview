@@ -5,7 +5,20 @@ All notable changes to magview. Dates are ISO-8601. Versioning is date-based
 
 ## [Unreleased]
 
+## [2026.08.25] — Windows build and first release
+
 ### Added
+- **Windows binaries.** A mingw-w64 cross-build (`make windows` /
+  `make windows-dist`) produces `magview.exe` with an icon, a version stamp
+  and a per-monitor DPI-aware manifest, packaged with `SDL2.dll` and the docs
+  into a zip. First tagged release: Windows zip + Linux AppImage + a
+  `SHA256SUMS.txt` manifest, via `make release`.
+- **Portable Linux AppImage** (`make appimage`): built against glibc 2.35 in a
+  bubblewrap sandbox with a `dlopen`-backend SDL2, so it runs on any stable
+  distribution with nothing to install.
+- The interface now looks for a **bundled DejaVu Sans** beside the executable
+  first (via `SDL_GetBasePath`), so text renders the same on a machine with no
+  fonts installed — which is what the AppImage carries.
 - **Mouseover tooltips**: rest the pointer on any control for a one-line
   description. Drawn into the overlay buffer (not `nk_tooltip`) so a hint on
   the narrow rail is not clipped, with a short dwell before it appears.

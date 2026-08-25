@@ -1,6 +1,6 @@
 # magview — operator's manual
 
-Marine Magnetics Explorer acquisition and display, version 2026.08.20.
+Marine Magnetics Explorer acquisition and display, version 2026.08.25.
 
 This file is generated from the help built into the program:
 `magview --help-doc > docs/HELP.md`, or `make help-doc`. Edit

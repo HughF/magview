@@ -22,7 +22,7 @@
 #define MV_VERSION_H
 
 #define MAGVIEW_NAME    "magview"
-#define MAGVIEW_VERSION "2026.08.20"
+#define MAGVIEW_VERSION "2026.08.25"
 #define MAGVIEW_TAGLINE "Marine Magnetics Explorer acquisition and display"
 
 #endif /* MV_VERSION_H */

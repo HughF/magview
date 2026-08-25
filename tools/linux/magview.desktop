@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=magview
+GenericName=Magnetometer display
+Comment=Marine Magnetics Explorer acquisition and display
+Exec=magview
+Icon=magview
+Terminal=false
+Categories=Science;Engineering;
+Keywords=magnetometer;magnetics;Explorer;survey;geophysics;NMEA;

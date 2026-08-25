@@ -1779,7 +1779,25 @@ MvUi *mv_ui_create(SDL_Window *win, SDL_Renderer *ren, MvApp *app)
     cfg.pixel_snap = 0;
 
     struct nk_font *font = NULL;
-    static const char *candidates[] = {
+
+    /* A bundled face is looked for first, relative to the executable, so the
+     * interface reads the same on a machine with no fonts installed — which is
+     * what a minimal image or an AppImage target looks like. Falls back to the
+     * usual system faces. Paths are built from SDL_GetBasePath because an
+     * AppImage is mounted somewhere different every time it runs. */
+    char bundled[2][512];
+    bundled[0][0] = bundled[1][0] = '\0';
+    char *base = SDL_GetBasePath();
+    if (base) {
+        snprintf(bundled[0], sizeof bundled[0], "%sDejaVuSans.ttf", base);
+        snprintf(bundled[1], sizeof bundled[1],
+                 "%s../share/magview/DejaVuSans.ttf", base);
+        SDL_free(base);
+    }
+
+    const char *candidates[] = {
+        bundled[0],
+        bundled[1],
         "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
@@ -1788,9 +1806,12 @@ MvUi *mv_ui_create(SDL_Window *win, SDL_Renderer *ren, MvApp *app)
         "C:\\Windows\\Fonts\\segoeui.ttf",
         NULL
     };
-    for (int i = 0; candidates[i] && !font; i++)
+    for (int i = 0; candidates[i] && !font; i++) {
+        if (!candidates[i][0])
+            continue;
         font = nk_font_atlas_add_from_file(atlas, candidates[i],
                                            14.0f * ui->scale, &cfg);
+    }
     nk_sdl_font_stash_end();
     if (font)
         nk_style_set_font(ui->ctx, &font->handle);

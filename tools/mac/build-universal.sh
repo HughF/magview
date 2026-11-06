@@ -22,10 +22,15 @@ export PATH="$prefix/bin:$PATH"
 [ "$(command -v sdl2-config)" = "$prefix/bin/sdl2-config" ] || {
     echo "sdl2-config is not the one in $prefix/bin" >&2; exit 1; }
 
+# SDL_LIBS is used only at link time. The rpath lets the executable find the
+# SDL2 dylib that make-app.sh puts in Contents/Frameworks; the header padding
+# leaves install_name_tool room to rewrite load commands afterwards.
+sdl_libs="$(sdl2-config --libs) -Wl,-headerpad_max_install_names -Wl,-rpath,@executable_path/../Frameworks"
+
 cd "$here"
 for arch in arm64 x86_64; do
     make clean >/dev/null
-    make -j"$(sysctl -n hw.ncpu)" CC="cc -arch $arch"
+    make -j"$(sysctl -n hw.ncpu)" CC="cc -arch $arch" SDL_LIBS="$sdl_libs"
     cp magview "$out/magview-$arch"
 done
 make clean >/dev/null

@@ -54,14 +54,14 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/magview.icns"
 iname="$(otool -D "$prefix/lib/libSDL2.dylib" | tail -1)"
 cp -L "$prefix/lib/libSDL2.dylib" "$app/Contents/Frameworks/$(basename "$iname")"
 
-# Drop every build-machine rpath, then add the bundle's own.
+# Drop every build-machine rpath (and the bundle's own, which is put back), so
+# nothing left can point outside the .app. SDL2 depends on no sibling library,
+# so the dylib needs no rpath of its own.
 rpaths() { otool -l "$1" | awk '/LC_RPATH/{f=1} f&&/path /{print $2; f=0}' | sort -u; }
-for rp in $(rpaths "$exe"); do install_name_tool -delete_rpath "$rp" "$exe"; done
-install_name_tool -add_rpath "@executable_path/../Frameworks" "$exe"
-for lib in "$app"/Contents/Frameworks/*.dylib; do
-    for rp in $(rpaths "$lib"); do install_name_tool -delete_rpath "$rp" "$lib"; done
-    install_name_tool -add_rpath "@loader_path" "$lib"
+for f in "$exe" "$app"/Contents/Frameworks/*.dylib; do
+    for rp in $(rpaths "$f"); do install_name_tool -delete_rpath "$rp" "$f"; done
 done
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$exe"
 
 # ---- checks -----------------------------------------------------------------
 fail=0

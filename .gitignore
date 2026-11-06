@@ -20,3 +20,7 @@ tools/linux/.cache
 
 # Packaged release artifacts
 dist/
+
+# macOS build: the private universal SDL2 and the two per-architecture builds
+build-mac-deps/
+build-mac/

@@ -130,9 +130,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache SDL2 (universal, macOS 11.0 target)
+      - name: Restore SDL2 (universal, macOS 11.0 target)
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build-mac-deps/prefix
           key: mac-deps-${{ hashFiles('tools/mac/build-sdl2.sh') }}
@@ -140,6 +140,15 @@ jobs:
       - name: Build SDL2
         if: steps.deps.outputs.cache-hit != 'true'
         run: bash tools/mac/build-sdl2.sh "$PWD/build-mac-deps/prefix"
+
+      - name: Save SDL2
+        # Saved here, not at the end of the job, so a later failure does not
+        # throw away the few minutes this took.
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-mac-deps/prefix
+          key: mac-deps-${{ hashFiles('tools/mac/build-sdl2.sh') }}
 
       - name: Test
         run: make test
